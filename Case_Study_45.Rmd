@@ -1,0 +1,1519 @@
+---
+title: "Case Study"
+author: "Gruppe 45"
+output: 
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+    toc: TRUE
+    toc_depth: 3
+    number_sections: TRUE
+toc-title: "Inhaltsverzeichnis"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+```
+
+# Installationsroutine
+
+Zu Beginn werden die benötigten Pakete automatisiert durch eine Schleife installiert, falls diese noch nicht installiert sind. Anmerkung: Falls es beim Erstellen der Html Datei zu einem Error kommt, bitte zuerst die App ausführen, dort werden ebenfalls die benötigten Pakete installiert (manchmal kommt es zu Fehlern, wenn prettydoc nicht installiert ist).
+```{r}
+#Installationsroutine
+list_of_req_packages <- c("shiny", "raster", "tidyverse", "mapproj", "DT", "leaflet", 
+                          "leaflet.minicharts", "geosphere", "bslib", "RColorBrewer", 
+                          "mapview", "miceadds", "prettydoc")
+needed_packages <- list_of_req_packages[!(list_of_req_packages %in% installed.packages()[,"Package"])]
+if(length(needed_packages) > 0) install.packages(needed_packages, repos = "http://cran.us.r-project.org")
+```
+Anschließend werden die installierten Pakete jeweils entpackt.
+```{r}
+#Library-Import
+library(shiny)
+library(raster)
+library(tidyverse)
+library(mapproj)
+library(DT)
+library(leaflet)
+library(leaflet.minicharts)
+library(geosphere)
+library(bslib)
+library(RColorBrewer)
+library(mapview)
+library(miceadds)
+```
+# Datenimport und -aufbereitung
+
+## Relevante Dateien für die Aufgabenstellung
+
+Da die Lieferbeziehungen auf Komponenten- und Einzelteilebene des OEM1 in Deutschland darzustellen sind, wird im ersten Schritt ermittelt, welche Komponenten und welche Einzelteile in den Fahrzeugen des OEM1 (Typ11 und Typ 12) verbaut sind. Dafür werden zuerst die Tabellen mit den Bestandteilen der Fahrzeugtypen geladen. Dies geschieht mithilfe der read_csv2 Funktion, da die einzelnen Einträge mittels ; getrennt sind.
+
+```{r}
+bestandteile_typ11 <- read_csv2("./Data/Fahrzeug/Bestandteile_Fahrzeuge_OEM1_Typ11.csv")
+    
+bestandteile_typ12 <- read_csv2("./Data/Fahrzeug/Bestandteile_Fahrzeuge_OEM1_Typ12.csv")
+```
+
+Anschließend werden die verbauten Komponententypen ausgelesen. Dies geschieht mittels der unique Funktion (entfernt Duplikate) und der substr Methode (um bspw. die Karosserie ID "K4-112-1121-3" auf K4 zu kürzen)
+
+Für Fahrzeugtyp 11:
+```{r}
+#Karosserie
+unique(substr(bestandteile_typ11$ID_Karosserie, start = 1, stop = 2))
+      
+#Schaltung
+unique(substr(bestandteile_typ11$ID_Schaltung, start = 1, stop = 5))
+      
+#Sitze
+unique(substr(bestandteile_typ11$ID_Sitze, start = 1, stop = 5))
+        
+#Motor
+unique(substr(bestandteile_typ11$ID_Motor, start = 1, stop = 5))
+```
+
+Für Fahrzeugtyp 12:
+```{r}
+#Karosserie
+unique(substr(bestandteile_typ12$ID_Karosserie, start = 1, stop = 2))
+
+#Schaltung
+unique(substr(bestandteile_typ12$ID_Schaltung, start = 1, stop = 5))
+
+#Sitze
+unique(substr(bestandteile_typ12$ID_Sitze, start = 1, stop = 5))
+        
+#Motor
+unique(substr(bestandteile_typ12$ID_Motor, start = 1, stop = 5))
+```
+
+Durch die Betrachtung der Spaltennamen der Komponenten-Relationstabellen wird ersichtlich, welche Einzelteile verbaut sind. Somit müssen alle aufgeführten Tabellen inklusive der Relationstabellen der Komponenten geladen werden. Um später in der Shiny-App die Standorte der Werke einzeichnen zu können, werden außerdem die Geodaten Tabellen geladen werden.
+
+* Motor (K1BE1, K1DI1)
+  + T01
+  + T02
+  + T03
+  + T04
+  + T05
+  + T06
+* Sitzteile (K2LE1, K2ST1)
+  + T11
+  + T12
+  + T13
+  + T14
+* Schaltung(K3SG1, K3AG1)
+  + T21
+  + T22
+  + T23
+  + T24
+  + T25
+* Karosserie (K4, K5)
+  + T30
+  + T31
+  + T32
+  + T33
+* Geodaten
+  + Tier1_Werke
+  + Tier2_Werke
+  
+## Datenimport und -aufbereitung
+
+### Vorgehen
+
+Da für die Aufgabenstellung nur die im Jahr 2016 produzierten Einzelteile betrachtet werden sollen, bietet sich ein Bottom-Up Vorgehen an, um die großen, speicheraufwendigen Einzelteiltabellen früh nach dem Jahr zu filtern. Somit werden im ersten Schritt die Einzelteile und dann anschließend aufbauend die Komponententabellen geladen. Des Weiteren werden die Tabellen nach dem Import (wie bereits erwähnt durch bspw. filtern) aufbereitet, um den Speicheraufwand möglichst gering zu halten.
+
+### Funktionen für die Datenaufbereitung
+
+Durch das Betrachten der einzelnen Datensätze wird ersichlich, dass immer wieder die gleichen "Fehler" bzw. Datenaufbereitungsschritte auszuführen sind, um einen optimalen finalen Datensatz zu erhalten. Deswegen werden nun zu Beginn Funktionen definiert, die im Verlauf des Imports dann aufgerufen werden. Typische Fehler sind z.B., dass Spalten manchmal doppelt, manchmal sogar dreifach auftreten und die Einträge in den falschen Spalten stehen bzw. verschoben sind. Außerdem werden für die Aufgabenstellung nur die Spalten Werksnummer, Herstellernummer und die ID benötigt, die restlichen Spalten können entfernt werden. Des Weiteren werden die Datentypen definiert, damit die einzelnen Werte das richtigen Format aufweisen.
+
+#### Fehler: nicht verschoben, 2fache Spalten
+
+Im ersten Schritt werden die nicht benötigten Spalten durch select gelöscht. Die Einträge für bspw. die Werknsummer sind auf zwei Spalten aufgeteilt (Werknummer.x und Werksnummer.y). Diese Spalten werden durch die unite Funktion "übereinander" gelegt, um anschließend nur noch eine Spalte "Werksnummer" mit den Einträgen der Spalten zu erhalten. Im letzten Schritt werden die Datentypen festgelegt (z.B. Herstellernummer: numeric, Produktionsdatum: date)
+```{r}
+tidy_double_columns <- function(data){
+        data_tidy <- data %>%
+                          select(c(-X1,-...1, -Fehlerhaft.x, -Fehlerhaft_Datum.x, -Fehlerhaft_Fahrleistung.x, -Fehlerhaft.y, -Fehlerhaft_Datum.y,-Fehlerhaft_Fahrleistung.y)) %>%
+                          unite("Produktionsdatum",Produktionsdatum.x | Produktionsdatum.y, na.rm = TRUE, remove = TRUE) %>% #
+                          unite("Werksnummer",Werksnummer.x | Werksnummer.y, na.rm = TRUE, remove = TRUE) %>%
+                          unite("Herstellernummer",Herstellernummer.x | Herstellernummer.y, na.rm = TRUE, remove = TRUE) %>%
+                          mutate("Werksnummer" = as.numeric(Werksnummer)) %>%
+                          mutate("Herstellernummer" = as.numeric(Herstellernummer)) %>%
+                          mutate("Produktionsdatum" = as.Date(Produktionsdatum,format = "%Y-%m-%d"))
+        
+return(data_tidy)
+}
+```
+
+#### Fehler: nicht verschoben, 3fache Spalten
+
+Das Vorgehen bleibt gleich, nur dass anstelle von zwei Spalten, die Informationen auf drei Spalten aufgeteilt sind. Diese werden sukzessive mittels der unite Funktion zusammengeführt.
+
+```{r}
+  tidy_triple_columns <- function(data){
+    data_tidy <- data %>%
+                      select(c(-X1,-...1, -Fehlerhaft.x, -Fehlerhaft_Datum.x, -Fehlerhaft_Fahrleistung.x, -Fehlerhaft.y, -Fehlerhaft_Datum.y, -Fehlerhaft_Fahrleistung.y, -Fehlerhaft, -Fehlerhaft_Datum, -Fehlerhaft_Fahrleistung)) %>%
+                      unite("Produktionsdatum",Produktionsdatum.x | Produktionsdatum, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Produktionsdatum",Produktionsdatum.y | Produktionsdatum, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Herstellernummer", Herstellernummer.x | Herstellernummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Herstellernummer", Herstellernummer.y | Herstellernummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Werksnummer",Werksnummer.x | Werksnummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Werksnummer",Werksnummer.y | Werksnummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      mutate("Herstellernummer" = as.numeric(Herstellernummer)) %>%
+                      mutate("Werksnummer" = as.numeric(Werksnummer)) %>%
+                      mutate("Produktionsdatum" = as.Date(Produktionsdatum,format = "%Y-%m-%d"))
+    
+    return(data_tidy)
+  }
+```
+
+#### Fehler: um eins verschoben, 2fache Spalten
+
+Hier wiederum sind erneut die Informationen auf zwei Spalten aufgeteilt, aber auch gleichzeitig die Einträge um eine Spalte verschoben. Das Produktionsdatum steht somit beispielswese in den Spalten Herstellernummer.x und Herstellernummer.y. Dies führt zu der im ersten Moment komisch wirkenden Definition der unite Funktionen.
+
+
+```{r}
+tidy_double_columns_p <- function(data){
+    data_tidy <- data %>%
+                      select(c(-X1, -Fehlerhaft_Datum.x, -Fehlerhaft_Fahrleistung.x,
+                                    -Fehlerhaft_Datum.y, -Fehlerhaft_Fahrleistung.y)) %>%
+                      
+                      unite("Produktionsdatum",Herstellernummer.x | Herstellernummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Werksnummer",Fehlerhaft.x | Fehlerhaft.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Herstellernummer",Werksnummer.x | Werksnummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+
+                      mutate("Herstellernummer" = as.numeric(Herstellernummer)) %>%
+                      mutate("Werksnummer" = as.numeric(Werksnummer)) %>%
+                      mutate("Produktionsdatum" = as.Date(Produktionsdatum,format = "%Y-%m-%d"))
+    
+    return(data_tidy)
+  }
+```
+
+#### Fehler: um eins verschoben, 3fache Spalten
+
+Kombination aus um eins verschobene Einträge und drei fache Spalten. Das Vorgehen ist analog zu den oberen Fällen.
+
+```{r}
+tidy_triple_columns_p <- function(data){
+    data_tidy <- data %>%
+                      select(c(-X1, -Fehlerhaft_Datum.x, -Fehlerhaft_Fahrleistung.x,
+                                    -Fehlerhaft_Datum.y, -Fehlerhaft_Fahrleistung.y,
+                                    -Fehlerhaft_Datum,   -Fehlerhaft_Fahrleistung)) %>%
+                      unite("Produktionsdatum",Herstellernummer.x | Herstellernummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Produktionsdatum",Herstellernummer.y | Produktionsdatum, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Herstellernummer",Werksnummer.x | Werksnummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Herstellernummer",Werksnummer.y | Herstellernummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Werksnummer",Fehlerhaft.x | Fehlerhaft, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Werksnummer",Fehlerhaft.y | Werksnummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      
+                      mutate("Herstellernummer" = as.numeric(Herstellernummer)) %>%
+                      mutate("Werksnummer" = as.numeric(Werksnummer)) %>%
+                      mutate("Produktionsdatum" = as.Date(Produktionsdatum)) 
+    
+    return(data_tidy)
+  }
+```
+
+#### Fehler: wild verschoben, 3fache Spalten
+
+Im Gegensatz zu den vorherigen Fällen, sind die Einträge der Spalten nicht nur um eins verschoben, sondern ohne jegliches System. Durch Betrachten der Tabelle, konnte man die Einträge zuordnen und anschließend durch die unite Funktion richtig zusammenführen.
+
+```{r}
+tidy_triple_columns_w <- function(data){
+    data_tidy <- data %>%
+                      select(c(-X1, -Fehlerhaft_Datum.x, -Fehlerhaft_Fahrleistung.x,
+                                    -Fehlerhaft_Datum.y, -Fehlerhaft_Fahrleistung.y,
+                                    -Fehlerhaft_Datum,   -Fehlerhaft_Fahrleistung)) %>%
+                      unite("Produktionsdatum", Herstellernummer.x | Herstellernummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Produktionsdatum", Herstellernummer.y | Produktionsdatum, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Herstellernummer", Werksnummer.x | Werksnummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Herstellernummer", Werksnummer.y | Herstellernummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Werksnummer", Fehlerhaft.x | Fehlerhaft, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                      unite("Werksnummer", Fehlerhaft.y | Werksnummer, sep = "", na.rm = TRUE, remove = TRUE) %>%
+
+                      mutate("Herstellernummer" = as.numeric(Herstellernummer)) %>%
+                      mutate("Werksnummer" = as.numeric(Werksnummer))
+      
+      
+    
+    return(data_tidy)
+  }
+```
+
+#### Fehler: nicht verschoben, Datum berechnen
+
+Bei diesem Fehlertyp muss das genaue Produktionsdatum aus den Spalten "origin" und "Produktionsdatum_Origin_01011970" berechnet werden.
+
+```{r}
+ tidy_compute_prod_d <- function(data){
+    data_tidy <- data %>%
+                      mutate("origin_as_date" = as.Date(origin,format = "%d-%m-%Y")) %>%
+                      mutate("Produktionsdatum" = as.Date(Produktionsdatum_Origin_01011970, origin = origin_as_date)) %>%
+                      
+                      select(c(-origin, -Produktionsdatum_Origin_01011970, -origin_as_date))
+    
+      return(data_tidy)
+  }
+```
+
+#### Fehler: verschoben, Datum berechnen
+
+Zusätzlich zur Fehlerberechnung sind hier die Einträge in den falschen Spalten. Durch die Verschiebung stehen in der letzten Spalte "origin" zwei Einträge. Diese werden durch die separate Funktion in die Spalten "Produktionsdatum_Origin_01011970" und "origin" aufgeteilt, um anschließend das Datum berechnen zu können.
+
+```{r}
+tidy_compute_prod_d_p <- function(data){
+    data_tidy <- data %>%
+                mutate("Herstellernummer" = as.numeric(Werksnummer)) %>%
+                mutate("Werksnummer" = as.numeric(Fehlerhaft)) %>%
+                select(c(-X1, -Fehlerhaft_Datum, -Fehlerhaft_Fahrleistung,-Produktionsdatum_Origin_01011970,-Fehlerhaft)) %>%
+                separate(origin, sep = ",", into = c("Produktionsdatum_Origin_01011970", "origin") ) %>%
+                mutate("Produktionsdatum_Origin_01011970" = as.numeric(Produktionsdatum_Origin_01011970)) %>%
+                mutate("origin" = str_replace_all(origin, "\"0", "0")) %>%
+                mutate("origin" = str_replace_all(origin, "0\"", "0")) %>%
+                tidy_compute_prod_d() 
+    
+    return(data_tidy)
+  }
+```
+
+### Importieren der Einzelteile
+
+Nun werden nacheinander die Einzeleil-Tabellen geladen. Manche Tabellen liegen als .csv Dateien vor, welche ohne weitere Probleme eingelesen werden können. Andere Datensätze liegen als .txt Dateien vor, in denen alle Einträge der Datensätze in einer einzigen Zeile stehen. Je Textdatei unerscheidet sich die Art und Weise, wie Zeilenumbrüche und einzelne Einträge voneinander abgetrennt sind. Um diese Textdateien importieren zu können, wurden diese im ersten Schritt mit einem Editor betrachtet, um die Trennzeichen auffindig zu machen. Anschließend werden die Datein als ein einziger String eingelesen (read_file()) und die Trennzeichen mithilfe Regex mit , oder einem Zeilenumbruch ersetzt. Ist dies erfolgt, kann der Datensatz mit der read_delim Funktion eingelesen werden, mit den selbst definierten Funktionen aufbereitet werden und zu guter Letzt nach dem Produktionsdatum gefiltert werden.
+
+#### T01
+
+In diesem Datenatz sind die Einträge durch " | | " abgetrennt (ohne ") und die Zeileumbrüche per " "  markiert. Außerdem sind nach dem Einlesen Spalten dreifach vorhanden und die Einträge um eins verchoben, weshalb die zuvor definierte Funktion tidy_triple_columns_p() aufgerufen wird.
+
+```{r}
+T_01 <- read_file("./Data/Einzelteil/Einzelteil_T01.txt") %>%
+                          str_replace_all("[:blank:]\\|[:blank:]\\|[:blank:]", "\\,") %>%
+                          str_replace_all("\"[:blank:]\"", "\"\n\"") %>%
+                          str_replace_all("NA[:blank:]\"", "NA\n\"") %>%
+                          str_replace_all("\\[:blank:]\"", "\\,0\n\"") %>%
+                          read_delim(delim = ",") %>%
+                          unite("ID",Produktionsdatum.x | Produktionsdatum, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          unite("ID",Produktionsdatum.y | ID, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          select(c(-ID_T01.x, -ID_T01.y, -ID_T01)) %>%
+                          tidy_triple_columns_p() %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum)
+```
+
+Der entstandene Datensatz sieht nun wiefolgt aus:
+```{r}
+T_01
+```
+
+#### T02
+
+Hier sind die einzelnen Einträge durch zwei Leerzeichen getrennt, Zeilenumbrüche per tab und " " markiert. Außerdem gibt es die Spalten in zweifacher Auführung und die Einträge sind um eins verschoben. Das Vorgehen ist analog zu T01.
+```{r}
+T_02 <- read_file("./Data/Einzelteil/Einzelteil_T02.txt") %>%
+                          str_replace_all("[:blank:]{2}", "\\,") %>%
+                          str_replace_all("\"[:blank:]\"", "\"\n\"") %>%
+                          str_replace_all("\t", "\n") %>%
+                          read_delim(delim = ",") %>%
+                          unite("ID",Produktionsdatum.x | Produktionsdatum.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          select(c(-ID_T02.x, -ID_T02.y)) %>%
+                          tidy_double_columns_p() %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum)
+```
+
+T02 sieht nach der Aufbereitung wie folgt aus:
+```{r}
+T_02
+```
+
+Diese Struktur weisen später alle Einzelteillisten auf.
+
+#### T03
+
+Hier sind wiederum die Einträge durch | voneinander getrennt und Zeilenumbrüche mittels eines Vertical Tabs markiert (x0B). Außerdem muss das Produktionsdatum berechnet werden und die Einträge sind um eins verschoben (Anwendung tidy_compute_prod_d_p()).
+```{r}
+T_03 <- read_file("./Data/Einzelteil/Einzelteil_T03.txt") %>%
+                          str_replace_all("\\|", "\\,") %>%
+                          str_replace_all("\x0B", "\n") %>%
+                          read_delim(delim = ",") %>%
+                          mutate("ID" = Herstellernummer) %>%
+                          select(-ID_T03) %>%
+                          tidy_compute_prod_d_p()%>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum)
+```
+
+#### T04
+
+Wie bereits erwähnt, lassen sich Dateien im csv Format deutlich leichter einlesen. Die Datenaufbereitung muss natürlich je nach Fehler durchgeführt werden (hier muss nur das Produktionsdatum berechnet werden)
+```{r}
+T_04 <- read_csv2("./Data/Einzelteil/Einzelteil_T04.csv") %>%
+                          select(c(-...1, -X1, -Fehlerhaft_Datum, -Fehlerhaft_Fahrleistung, -Fehlerhaft)) %>%
+                          tidy_compute_prod_d() %>%
+                          mutate("ID" = ID_T04) %>%
+                          select(-ID_T04) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum)
+```
+
+Da sich das Vorgehen und die auftretenden Fehler immer wiederholen, werden nun innerhalb der Dokumentation nur auf Besonderheiten hingewiesen.
+
+#### T05
+
+```{r}
+T_05 <- read_csv("./Data/Einzelteil/Einzelteil_T05.csv") %>%
+                        tidy_double_columns() %>%
+                        unite("ID",ID_T05.x | ID_T05.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                        filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                        select(-Produktionsdatum)
+```
+
+#### T06
+
+```{r}
+ T_06 <- read_csv("./Data/Einzelteil/Einzelteil_T06.csv") %>%
+                        select(c(-...1, -X1, -Fehlerhaft_Datum, -Fehlerhaft_Fahrleistung, -Fehlerhaft)) %>%
+                        tidy_compute_prod_d() %>%
+                        mutate("ID" = ID_T06) %>%
+                        select(-ID_T06) %>%
+                        filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                        select(-Produktionsdatum)
+```
+
+#### T11
+
+Hier sind die einzelnen Einträge durch tab getrennt, die Zeilenumbrüche sind mittels eines Form Feeds (x0c) markiert.
+```{r}
+ T_11 <- read_file("./Data/Einzelteil/Einzelteil_T11.txt") %>%
+                          str_replace_all("\x0C", "\n") %>%
+                          str_replace_all("\\t", "\\,") %>%
+                          read_delim(delim = ",") %>%
+                          mutate("ID" = Herstellernummer) %>%
+                          tidy_compute_prod_d_p()%>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum, -ID_T11)
+```
+
+#### T12
+
+```{r}
+T_12 <- read_csv2("./Data/Einzelteil/Einzelteil_T12.csv") %>%
+                          tidy_triple_columns() %>%
+                          unite("ID",ID_T12.x | ID_T12, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          unite("ID",ID_T12.y | ID, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum)
+```
+
+#### T13
+
+```{r}
+T_13 <- read_csv2("./Data/Einzelteil/Einzelteil_T13.csv") %>%
+                          select(c(-...1, -X1, -Fehlerhaft_Datum, -Fehlerhaft_Fahrleistung, -Fehlerhaft)) %>%
+                          tidy_compute_prod_d() %>%
+                          mutate("ID" = ID_T13) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum, -ID_T13)
+```
+
+#### T14
+
+```{r}
+T_14 <- read_csv2("./Data/Einzelteil/Einzelteil_T14.csv") %>%
+                          select(c(-...1, -X1, -Fehlerhaft_Datum, -Fehlerhaft_Fahrleistung, -Fehlerhaft)) %>%
+                          tidy_compute_prod_d() %>%
+                          mutate("ID" = ID_T14) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum, -ID_T14)
+```
+
+#### T15
+
+```{r}
+T_15 <- read_csv2("./Data/Einzelteil/Einzelteil_T15.csv") %>%
+                          tidy_double_columns() %>%
+                          unite("ID",ID_T15.x | ID_T15.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum)
+```
+
+#### T21
+
+```{r}
+T_21 <- read_csv2("./Data/Einzelteil/Einzelteil_T21.csv") %>%
+                          select(c(-...1, -X1, -Fehlerhaft_Datum, -Fehlerhaft_Fahrleistung, -Fehlerhaft)) %>%
+                          tidy_compute_prod_d() %>%
+                          mutate("ID" = ID_T21) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum, -ID_T21)
+```
+
+#### T22
+
+Hier sind die einzelnen Einträge durch einen tab voneinander getrennt und die Zeilenumbrüche durch kein Zeichen getrennt, sprich die Einträge folgen einander ohne Leerzeichen oder ähnliches.
+```{r}
+T_22 <- read_file("./Data/Einzelteil/Einzelteil_T22.txt") %>%
+                          str_replace_all("\\t", ",") %>%
+                          str_replace_all("\"\"", "\"\n\"") %>%
+                          str_replace_all("NA\"", "NA\n\"") %>%
+                          str_replace_all("\\,0\"", "0\n\"") %>%
+                          read_delim(delim = ",") %>%
+                          unite("ID",Produktionsdatum.x | Produktionsdatum, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          unite("ID",Produktionsdatum.y | ID, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          select(c(-ID_T22.x, -ID_T22.y)) %>%
+                          tidy_triple_columns_w() %>%
+                          mutate("Produktionsdatum" = as.Date(Produktionsdatum)) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum, -ID_T22)
+```
+
+#### T23
+
+```{r}
+T_23 <- read_csv2("./Data/Einzelteil/Einzelteil_T23.csv") %>%
+                          tidy_double_columns() %>%
+                          unite("ID",ID_T23.x | ID_T23.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum)
+```
+
+#### T24
+
+Hier sind die einzelnen Einträge mit zwei Leerzeichen voneinander getrennt und die Zeilenumbrüche miitels Form Feed markiert (x0c).
+```{r}
+T_24 <- read_file("./Data/Einzelteil/Einzelteil_T24.txt") %>%
+                          str_replace_all("\x0C", "\n") %>%
+                          str_replace_all("[:blank:]{2}", "\\,") %>%
+                          read_delim(delim = ",") %>%
+                          unite("ID",Produktionsdatum.x | Produktionsdatum, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          unite("ID",Produktionsdatum.y | ID, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          select(c(-ID_T24.x, -ID_T24.y)) %>%
+                          tidy_triple_columns_p() %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum, -ID_T24)
+```
+
+#### T25
+
+```{r}
+T_25 <- read_csv("./Data/Einzelteil/Einzelteil_T25.csv") %>%
+                        select(c(-...1, -X1, -Fehlerhaft_Datum, -Fehlerhaft_Fahrleistung, -Fehlerhaft)) %>%
+                        tidy_compute_prod_d() %>%
+                        mutate("ID" = ID_T25) %>%
+                        filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                        select(-Produktionsdatum, -ID_T25)
+```
+
+#### T30
+
+```{r}
+T_30 <- read_csv("./Data/Einzelteil/Einzelteil_T30.csv") %>%
+                          tidy_triple_columns() %>%
+                          unite("ID",ID_T30.x | ID_T30, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          unite("ID",ID_T30.y | ID, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum)
+```
+
+#### T31
+
+Hier sind die einzelnen Einträge durch ein doppeltes Leerzeichen getrennt und Zeilenumbrüche mittels Backspace (x08) markiert.
+```{r}
+T_31 <- read_file("./Data/Einzelteil/Einzelteil_T31.txt") %>%
+                          str_replace_all("\x08", "\n") %>%
+                          str_replace_all( "[:blank:]{2}", "\\,") %>%
+                          read_delim(delim = ",") %>%
+                          mutate("ID" = Herstellernummer) %>%
+                          tidy_compute_prod_d_p()%>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum, -ID_T31)
+```
+
+#### T32
+
+```{r}
+T_32 <- read_csv2("./Data/Einzelteil/Einzelteil_T32.csv") %>%
+                          tidy_double_columns() %>%
+                          unite("ID",ID_T32.x | ID_T32.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum)
+```
+
+#### T33
+
+```{r}
+T_33 <- read_csv("./Data/Einzelteil/Einzelteil_T33.csv") %>%
+                          select(c(-...1, -X1, -Fehlerhaft_Datum, -Fehlerhaft_Fahrleistung, -Fehlerhaft)) %>%
+                          tidy_compute_prod_d() %>%
+                          mutate("ID" = ID_T33) %>%          
+                          filter(between(Produktionsdatum, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>%
+                          select(-Produktionsdatum, -ID_T33)
+```
+
+### Verbinden der Einzelteil-Tabllen mit den Komponenten-Relationstabellen
+
+Um Herauszufinden welches Einzelteil in welcher Komponente verbaut ist, werden nun im Folgenden die benötgten Relationstabellen geladen und anschließend mittels eines left_joins mit den Einzelteillisten verbunden. Die Verwendung des left_joins stellt sicher, dass alle Einträge der Einzelteiltabellen erhalten bleiben. Da manche Einzelteiltypen in zwei Komponenten verbaut sein können, werden mache Einzelteil-Tabellen zweimal mittels left_join mit den dazugehörigen Komponenten-Relationstabellen verknüpft.
+
+#### T01
+
+T01 kann in der Komponente K1BE1 und K1DI1 verbaut sein. Deswegen werden diese Relationstabellen importiert:
+
+```{r}
+relation_k1be1 <- read_csv2("./Data/Komponente/Bestandteile_Komponente_K1BE1.csv") %>% select(-...1)
+
+relation_k1di1 <- read_csv2("./Data/Komponente/Bestandteile_Komponente_K1DI1.csv") %>% select(-...1)
+```
+
+Anschließend wird T01 mit einem left_join sukzessive mit den Relationstabellen miteinader verbunden. Die restlichen bzw. unwichtigen Spalten der Relationstabellen (z.B. ID_T2) werden mittels select entfernt. Da zweimal ein left_join durchgeführt wird, entstehen zwei Spalten mit den Kompnenten-IDs, die über die unite-Funktion zusammengeführt werden. Außerdem werden zu guter Letzt alle Zeilen, die keine Komponenten-ID zugeordnet bekommen haben, mit Hilfe der subset Funktion entfernt (da diese folglich nicht Teil der verbauten Komponenten des OEM1 sind).
+```{r}
+T_01 <- T_01 %>%
+              left_join(relation_k1be1,by = c("ID" = "ID_T1")) %>%
+              select(c(-ID_T2, -ID_T3, -ID_T4)) %>%
+              left_join(relation_k1di1,by = c("ID" = "ID_T1")) %>%
+              select(c(-ID_T2, -ID_T5, -ID_T6)) %>%
+              unite("Komponente_ID",ID_K1BE1 | ID_K1DI1, sep = "", na.rm = TRUE, remove = TRUE) %>%
+              subset(Komponente_ID != "")
+```
+
+Anschließend sieht die T01 Tabelle wiefolgt aus:
+```{r}
+T_01
+```
+
+Dieser Vorgang wird nun wiederum mit allen zuvor geladenen Einzelteiltabellen durchgeführt.
+
+#### T02
+
+T02 kann in der Komponente K1BE1 und K1DI1 verbaut sein.
+```{r}
+T_02 <- T_02 %>%
+              left_join(relation_k1be1,by = c("ID" = "ID_T2")) %>%
+              select(c(-ID_T1, -ID_T3, -ID_T4)) %>%
+              left_join(relation_k1di1,by = c("ID" = "ID_T2")) %>%
+              select(c(-ID_T1, -ID_T5, -ID_T6)) %>%
+              unite("Komponente_ID",ID_K1BE1 | ID_K1DI1, sep = "", na.rm = TRUE, remove = TRUE) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T03
+
+T03 kann in der Komponente K1BE1 verbaut sein.
+```{r}
+T_03 <- T_03 %>%
+              left_join(relation_k1be1,by = c("ID" = "ID_T3")) %>%
+              select(c(-ID_T1, -ID_T2, -ID_T4)) %>%
+              mutate("Komponente_ID" = ID_K1BE1) %>%
+              select(-ID_K1BE1) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T04
+
+T04 kann in der Komponente K1BE1 verbaut sein.
+```{r}
+T_04 <- T_04 %>%
+              left_join(relation_k1be1,by = c("ID" = "ID_T4")) %>%
+              select(c(-ID_T1, -ID_T2, -ID_T3)) %>%
+              mutate("Komponente_ID" = ID_K1BE1) %>%
+              select(-ID_K1BE1) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T05
+
+T05 kann in der Komponente K1DI1 verbaut sein.
+```{r}
+T_05 <- T_05 %>%
+              left_join(relation_k1di1,by = c("ID" = "ID_T5")) %>%
+              select(c(-ID_T1, -ID_T2, -ID_T6)) %>%
+              mutate("Komponente_ID" = ID_K1DI1) %>%
+              select(-ID_K1DI1) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T06
+
+T06 kann in der Komponente K1DI1 verbaut sein.
+```{r}
+T_06 <- T_06 %>%
+              left_join(relation_k1di1,by = c("ID" = "ID_T6")) %>%
+              select(c(-ID_T1, -ID_T2, -ID_T5)) %>%
+              mutate("Komponente_ID" = ID_K1DI1) %>%
+              select(-ID_K1DI1) %>%
+              subset(Komponente_ID != "")
+```
+
+Nach T06 wurden alle Einzelteile, die in den Komponenten K1BE1 und K1DI1 verbaut sind, mit der Komponenten-ID ergänzt. Deswegen können diese Realtionstabellen vom Workingspace entfernt werden, um Speicherplatz freizugeben.
+
+```{r}
+rm (relation_k1be1, relation_k1di1)
+```
+
+#### T11
+
+T11 kann in der Komponente K2LE1 und K2ST1 verbaut sein. Deswegen werden diese Relationstabellen importiert.
+```{r}
+relation_k2le1 <- read_csv2("./Data/Komponente/Bestandteile_Komponente_K2LE1.csv") %>%
+                                  select(-...1)
+
+relation_k2st1 <- read_csv2("./Data/Komponente/Bestandteile_Komponente_K2ST1.csv") %>%
+                                  select(c(-X1, -X))
+```
+
+Anschließend werden sie (analog zu oben) miteinander verbunden.
+```{r}
+ T_11 <- T_11 %>%
+                left_join(relation_k2le1,by = c("ID" = "ID_T11")) %>%
+                select(c(-ID_T14, -ID_T15)) %>%
+                left_join(relation_k2st1,by = c("ID" = "ID_T11")) %>%
+                select(c(-ID_T12, -ID_T13)) %>%
+                unite("Komponente_ID",ID_K2LE1 | ID_K2ST1, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                subset(Komponente_ID != "") 
+```
+
+#### T12
+
+T12 kann in der Komponente K2ST1 verbaut sein.
+```{r}
+T_12 <- T_12 %>%
+              left_join(relation_k2st1,by = c("ID" ="ID_T12")) %>%
+              select(c(-ID_T11, -ID_T13)) %>%
+              mutate("Komponente_ID" = ID_K2ST1) %>%
+              select(-ID_K2ST1) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T13
+
+T13 kann in der Komponente K2ST1 verbaut sein.
+```{r}
+T_13 <- T_13 %>%
+              left_join(relation_k2st1,by = c("ID" = "ID_T13")) %>%
+              select(c(-ID_T11, -ID_T12)) %>%
+              mutate("Komponente_ID" = ID_K2ST1) %>%
+              select(-ID_K2ST1) %>%
+              subset(Komponente_ID != "") 
+```
+
+#### T14
+
+T14 kann in der Komponente K2LE1 verbaut sein.
+```{r}
+T_14 <- T_14 %>%
+              left_join(relation_k2le1,by =c("ID" = "ID_T14")) %>%
+              select(c(-ID_T11, -ID_T15)) %>%
+              mutate("Komponente_ID" = ID_K2LE1) %>%
+              select(-ID_K2LE1) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T15
+
+T15 kann in der Komponente K2LE1 verbaut sein.
+```{r}
+T_15 <- T_15 %>%
+              left_join(relation_k2le1,by =c("ID" = "ID_T15")) %>%
+              select(c(-ID_T11, -ID_T14)) %>%
+              mutate("Komponente_ID" = ID_K2LE1) %>%
+              select(-ID_K2LE1) %>%
+              subset(Komponente_ID != "")
+```
+
+Nun können erneut die Relationstabellen gelöscht werden.
+```{r}
+rm (relation_k2le1, relation_k2st1)
+```
+
+#### T21
+
+T21 kann in der Komponente K3SG1 und K3AG1 verbaut sein. Deswegen werden diese Relationstabellen importiert.
+```{r}
+relation_k3sg1 <- read_csv2("./Data/Komponente/Bestandteile_Komponente_K3SG1.csv") %>%
+                                  select(-X1)
+      
+relation_k3ag1 <- read_csv2("./Data/Komponente/Bestandteile_Komponente_K3AG1.csv") %>%
+                                  select(-X1)
+```
+
+Anschließend werden sie (analog zu oben) miteinander verbunden.
+```{r}
+T_21 <- T_21 %>%
+              left_join(relation_k3sg1,by = c("ID" = "ID_T21")) %>%
+              select(c(-ID_T22, -ID_T23)) %>%
+              left_join(relation_k3ag1,by = c("ID" = "ID_T21")) %>%
+              select(c(-ID_T24, -ID_T25)) %>%
+              unite("Komponente_ID",ID_K3SG1 | ID_K3AG1, sep = "", na.rm = TRUE, remove = TRUE) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T22
+
+T22 kann in der Komponente K3SG1 verbaut sein.
+```{r}
+T_22 <- T_22 %>%
+              left_join(relation_k3sg1,by = c("ID" = "ID_T22")) %>%
+              select(c(-ID_T21, -ID_T23)) %>%
+              mutate("Komponente_ID" = ID_K3SG1) %>%
+              select(-ID_K3SG1) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T23
+
+T23 kann in der Komponente K3SG1 verbaut sein.
+```{r}
+T_23 <- T_23 %>%
+              left_join(relation_k3sg1,by = c("ID" = "ID_T23")) %>%
+              select(c(-ID_T21, -ID_T22)) %>%
+              mutate("Komponente_ID" = ID_K3SG1) %>%
+              select(-ID_K3SG1) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T24
+
+T24 kann in der Komponente K3AG1 verbaut sein.
+```{r}
+T_24 <- T_24 %>%
+              left_join(relation_k3ag1,by = c("ID" = "ID_T24")) %>%
+              select(c(-ID_T21, -ID_T25)) %>%
+              mutate("Komponente_ID" = ID_K3AG1) %>%
+              select(-ID_K3AG1) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T25
+
+T25 kann in der Komponente K3AG1 verbaut sein.
+```{r}
+T_25 <- T_25 %>%
+              left_join(relation_k3ag1,by = c("ID" = "ID_T25")) %>%
+              select(c(-ID_T21, -ID_T24)) %>%
+              mutate("Komponente_ID" = ID_K3AG1) %>%
+              select(-ID_K3AG1) %>%
+              subset(Komponente_ID != "")
+```
+
+Nun können erneut die Relationstabellen gelöscht werden.
+```{r}
+rm (relation_k3sg1, relation_k3ag1)
+```
+
+#### T30
+
+T30 kann in der Komponente K4 und K5 verbaut sein. Deswegen werden diese Relationstabellen importiert.
+```{r}
+relation_k4 <- read_csv2("./Data/Komponente/Bestandteile_Komponente_K4.csv") %>%
+                                  select(-X1)
+    
+relation_k5 <- read_csv2("./Data/Komponente/Bestandteile_Komponente_K5.csv") %>%
+                                  select(-X1)
+```
+
+Anschließend werden sie (analog zu oben) miteinander verbunden.
+```{r}
+T_30 <- T_30 %>%
+              left_join(relation_k4,by = c("ID" = "ID_T30")) %>%
+              select(c(-ID_T31, -ID_T32)) %>%
+              left_join(relation_k5,by = c("ID" = "ID_T30")) %>%
+              select(c(-ID_T31, -ID_T33)) %>%
+              unite("Komponente_ID",ID_K4 | ID_K5, sep = "", na.rm = TRUE, remove = TRUE) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T31
+
+T31 kann in der Komponente K4 und K5 verbaut sein.
+```{r}
+T_31 <- T_31 %>%
+              left_join(relation_k4,by = c("ID" = "ID_T31")) %>%
+              select(c(-ID_T30, -ID_T32)) %>%
+              left_join(relation_k5,by = c("ID" = "ID_T31")) %>%
+              select(c(-ID_T30, -ID_T33)) %>%
+              unite("Komponente_ID",ID_K4 | ID_K5, sep = "", na.rm = TRUE, remove = TRUE) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T32
+
+T32 kann in K4 verbaut sein.
+```{r}
+T_32 <- T_32 %>%
+              left_join(relation_k4,by = c("ID" = "ID_T32")) %>%
+              select(c(-ID_T30, -ID_T31)) %>%
+              mutate("Komponente_ID" = ID_K4) %>%
+              select(-ID_K4) %>%
+              subset(Komponente_ID != "")
+```
+
+#### T33
+
+T33 kann in K5 verbaut sein.
+```{r}
+T_33 <- T_33 %>%
+              left_join(relation_k5,by = c("ID" = "ID_T33")) %>%
+              select(c(-ID_T30, -ID_T31)) %>%
+              mutate("Komponente_ID" = ID_K5) %>%
+              select(-ID_K5) %>%
+              subset(Komponente_ID != "")
+```
+
+Nun können erneut die Relationstabellen gelöscht werden.
+```{r}
+rm (relation_k4, relation_k5)
+```
+
+### Verbinden der Einzelteiltabellen mit Komponententabellen
+
+Da es für die Aufgabenstellung von Bedeutung ist, wer (=Komponentenhersteller) und wo (Komponentenherstellerwerk) die Einzelteile in die Komponente verbaut wurden, müssen nun die gerade erstellten Einzelteillisten mit den Komponententabellen verbunden werden. Dies gescchieht erneut mittels eines left_joins.
+
+
+#### T01
+
+T01 ist wie bereits bekannt in den Komponenten K1BE1 und K1DI1 verbaut. Deswegen müssen diese Tabellen zunächst importiert werden. Die Komponententabellen weisen wie auch die Einzelteiltabellen manchmal Formatierungsfehler auf, weshab sie nach dem importieren gleich aufbereitet werden (hier kommen erneut die am Anfang definierten Funktionen zum Einsatz)
+```{r}
+komponente_k1be1 <- read_csv("./Data/Komponente/Komponente_K1BE1.csv") %>%
+                                    select(c(ID_Motor, Herstellernummer, Werksnummer)) %>%
+                                    mutate("Komponente_ID" = ID_Motor) %>%
+                                    mutate("Komponente_Herstellernummer" = Herstellernummer) %>%
+                                    mutate("Komponente_Werksnummer" = Werksnummer) %>%
+                                    select(-ID_Motor, -Herstellernummer, -Werksnummer)
+
+komponente_k1di1 <- read_csv("./Data/Komponente/Komponente_K1DI1.csv") %>%
+                                  tidy_triple_columns() %>%
+                                  unite("Komponente_ID",ID_Motor.x | ID_Motor, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                                  unite("Komponente_ID",ID_Motor.y | Komponente_ID, sep = "", na.rm = TRUE, remove = TRUE) %>%
+            
+                                  mutate("Komponente_Herstellernummer" = Herstellernummer) %>%
+                                  mutate("Komponente_Werksnummer" = Werksnummer) %>%
+                                  select(-Produktionsdatum, -Herstellernummer, -Werksnummer)
+```
+
+Nun werden sie analog zu den Relationstabellen miteinander verbunden und die Datentypen festgelegt.
+```{r}
+T_01 <- T_01 %>%
+              left_join(komponente_k1be1, by = "Komponente_ID") %>%
+              left_join(komponente_k1di1, by = "Komponente_ID") %>%
+              unite("Komponente_Herstellernummer", Komponente_Herstellernummer.x | Komponente_Herstellernummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+              unite("Komponente_Werksnummer", Komponente_Werksnummer.x | Komponente_Werksnummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+              mutate("Komponente_Herstellernummer" = as.numeric(Komponente_Herstellernummer)) %>%
+              mutate("Komponente_Werksnummer" = as.numeric(Komponente_Werksnummer) )
+```
+
+T_01 hat nun folgende Form
+```{r}
+T_01
+```
+
+Dieses Format werden alle Einzelteiltabellen nach diesem Kapitel aufweisen.
+
+#### T02
+
+T02 ist in K1BE1 und K1DI1 verbaut.
+```{r}
+T_02 <- T_02 %>%
+              left_join(komponente_k1be1, by = "Komponente_ID") %>%
+              left_join(komponente_k1di1, by = "Komponente_ID") %>%
+              unite("Komponente_Herstellernummer", Komponente_Herstellernummer.x | Komponente_Herstellernummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+              unite("Komponente_Werksnummer", Komponente_Werksnummer.x | Komponente_Werksnummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+              mutate("Komponente_Herstellernummer" = as.numeric(Komponente_Herstellernummer)) %>%
+              mutate("Komponente_Werksnummer" = as.numeric(Komponente_Werksnummer) )
+```
+
+#### T03
+
+T03 ist in K1BE1 verbaut.
+```{r}
+T_03 <- T_03 %>%
+              left_join(komponente_k1be1, by = "Komponente_ID")
+```
+
+#### T04
+
+T04 ist in K1BE1 verbaut.
+```{r}
+T_04 <- T_04 %>%
+              left_join(komponente_k1be1, by = "Komponente_ID")
+```
+
+#### T05
+
+T05 ist in K1DI1 verbaut.
+```{r}
+T_05 <- T_05 %>%
+              left_join(komponente_k1di1, by = "Komponente_ID")
+```
+
+#### T06
+
+T05 ist in K1DI1 verbaut.
+```{r}
+T_06 <- T_06 %>%
+          left_join(komponente_k1di1, by = "Komponente_ID")
+```
+
+Anschließend werden die Komponenten-Tabellen nicht mehr benötigt und können deswegen gelöscht werden
+```{r}
+rm (komponente_k1be1, komponente_k1di1)
+```
+
+#### T11
+
+T11 ist in K2LE1 und K2ST1 verbaut. Deswegen werden diese Komponententabellen importiert. Dabei liegen die Datensätze in .txt Format vor und müssen deswegen wie oben bereits "umständlicher" importiert werden (Bearbeitung mittels Regex, um Dateien in richtiges Format zu bekommen). Insbesondere kommt es bei der Komponente K2ST1 zu einem Fehler, wenn es durch eine Pipeline realsieren wird (Fehlermeldung: Error in basename(path) : file name conversion problem -- name too long?). Deswegen wurde ein Workaround gewählt (lokales Speichern der Textdatei, dann erneutes einlesen und löschen der Textdatei mittels unlink-Funktion).
+```{r}
+komponente_k2le1 <- read_file("./Data/Komponente/Komponente_K2LE1.txt") %>%
+                                      str_replace_all("\x0B", "\n") %>%
+                                      str_replace_all("II", "\\,") %>%
+                                      read_delim(delim = ",") %>%
+                                      unite("Komponente_ID",Produktionsdatum.x | Produktionsdatum.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                                      select(c(-ID_Sitze.x, -ID_Sitze.y)) %>%
+                                      tidy_double_columns_p() %>%
+                                      mutate("Komponente_Herstellernummer" = Herstellernummer) %>%
+                                       mutate("Komponente_Werksnummer" = Werksnummer) %>%
+                                      select(-Produktionsdatum, -Herstellernummer, -Werksnummer)
+
+komponente_k2st1 <- read_file("./Data/Komponente/Komponente_K2ST1.txt") %>%
+                                      str_replace_all("\\|", ",") %>%
+                                      str_replace_all("\\,[:digit:]+\\,\"", "\\,\"") %>%
+                                      writeLines("komponente_k2st1_neu.txt")
+      
+komponente_k2st1 <-  read_delim("komponente_k2st1_neu.txt", delim = ",") %>%
+                                      select(c(ID_Sitze, Herstellernummer, Werksnummer)) %>%
+                                      mutate("Komponente_ID" = ID_Sitze) %>%
+                                      mutate("Komponente_Herstellernummer" = Herstellernummer) %>%
+                                      mutate("Komponente_Werksnummer" = Werksnummer) %>%
+                                      select(-ID_Sitze, -Herstellernummer, -Werksnummer)
+
+unlink("komponente_k2st1_neu.txt")
+```
+
+Bei genauerer Betrachtung der Tabelle "Komponente K2ST1" fällt auf, dass Fehler im Datensatz vorhanden sind: 
+```{r}
+filter(komponente_k2st1, Komponente_ID == "K2ST1-110-1101-918828")
+```
+
+Beispielsweise bei der der Komponente "K2ST1-110-1101-918828" wird die Komponenten-Herstellernummer mit 109 und die Komponenten_Werksnummer mit 1092 angegeben. Dies widerspricht jedoch der Komponenten_ID, da hier die Herstellernummer 110 und die Werksnummer 1101 aufgeführt wird. Dies ist bei einigen Komponenten der Fall. Da es nicht möglich ist, festzustellen, wo genau der Fehler liegt (Spalte ID oder Spalten Herstellernummer/Werknummer), wird für die nachfolgenden Auswertungen in der Shiny-App die Spalten Komponente_Herstellernummer und Komponente_Werksnummer als richtig angenommen.
+
+Anschließend wird nun (analog zu oben) die Einzelteil-Tabelle T11 mit den gerade importierten Komponententabellen verknüpft.
+
+```{r}
+      T_11 <- T_11 %>%
+        left_join(komponente_k2le1, by = "Komponente_ID") %>%
+        left_join(komponente_k2st1, by = "Komponente_ID") %>%
+        
+        unite("Komponente_Herstellernummer", Komponente_Herstellernummer.x | Komponente_Herstellernummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+        unite("Komponente_Werksnummer", Komponente_Werksnummer.x | Komponente_Werksnummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+      
+        mutate("Komponente_Herstellernummer" = as.numeric(Komponente_Herstellernummer)) %>%
+        mutate("Komponente_Werksnummer" = as.numeric(Komponente_Werksnummer) )
+```
+
+#### T12
+
+T12 ist in K2ST1 verbaut.
+```{r}
+T_12 <- T_12 %>%
+              left_join(komponente_k2st1, by = "Komponente_ID")
+```
+
+#### T13
+
+T13 ist in K2ST1 verbaut.
+```{r}
+T_13 <- T_13 %>%
+        left_join(komponente_k2st1, by = "Komponente_ID")
+```
+
+#### T14
+
+T14 ist in K2LE1 verbaut.
+```{r}
+T_14 <- T_14 %>%
+        left_join(komponente_k2le1, by = "Komponente_ID")
+```
+
+#### T15
+
+T15 ist in K2LE1 verbaut.
+```{r}
+T_15 <- T_15 %>%
+        left_join(komponente_k2le1, by = "Komponente_ID")
+```
+
+Anschließend werden die Komponenten-Tabellen nicht mehr benötigt und können deswegen gelöscht werden
+```{r}
+rm (komponente_k2st1, komponente_k2le1)
+```
+
+#### T21
+
+T21 kann sowohl in der Komponente 3SG1 und K3AG1 verbaut sein. Deshalb werden diese Komponenten-Tabellen im ersten Schritt importiert und in dem Zuge gelich aufbereitet. Hierbei kommen erneut die anfangs definierten Funktionen zum Einsatz.
+```{r}
+komponente_k3sg1 <- read_csv("./Data/Komponente/Komponente_K3SG1.csv") %>%
+                                        tidy_double_columns() %>%
+                                        unite("Komponente_ID",ID_Schaltung.x | ID_Schaltung.y, na.rm = TRUE, remove = TRUE) %>%
+                                        mutate("Komponente_Herstellernummer" = Herstellernummer) %>%
+                                        mutate("Komponente_Werksnummer" = Werksnummer) %>%
+                                        select(c(-Herstellernummer, -Werksnummer, -Produktionsdatum))
+
+komponente_k3ag1 <- read_csv("./Data/Komponente/Komponente_K3AG1.csv") %>%
+                                        tidy_triple_columns() %>%
+                                        unite("Komponente_ID",ID_Schaltung.x | ID_Schaltung, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                                        unite("Komponente_ID",ID_Schaltung.y | Komponente_ID, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                                        mutate("Komponente_Herstellernummer" = Herstellernummer) %>%
+                                        mutate("Komponente_Werksnummer" = Werksnummer) %>%
+                                        select(c(-Herstellernummer, -Werksnummer, -Produktionsdatum))
+```
+
+Anschließend werden die importierten Komponententabellen wiederum mit der Einzeilteiltabelle verknüpft.
+```{r}
+T_21 <- T_21 %>% 
+                          left_join(komponente_k3sg1, by = "Komponente_ID") %>%
+                          left_join(komponente_k3ag1, by = "Komponente_ID") %>%
+                          unite("Komponente_Herstellernummer", Komponente_Herstellernummer.x | Komponente_Herstellernummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          unite("Komponente_Werksnummer", Komponente_Werksnummer.x | Komponente_Werksnummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          mutate("Komponente_Herstellernummer" = as.numeric(Komponente_Herstellernummer)) %>%
+                          mutate("Komponente_Werksnummer" = as.numeric(Komponente_Werksnummer) )
+```
+
+#### T22
+
+T22 ist in K3SG1 verbaut.
+```{r}
+T_22 <- T_22 %>%
+              left_join(komponente_k3sg1, by = "Komponente_ID")
+```
+
+#### T23
+
+T23 ist in K3SG1 verbaut.
+```{r}
+T_23 <- T_23 %>%
+            left_join(komponente_k3sg1, by = "Komponente_ID")
+```
+
+#### T24
+
+T24 ist in K3AG1 verbaut.
+```{r}
+T_24 <- T_24 %>%
+            left_join(komponente_k3ag1, by = "Komponente_ID")
+```
+
+#### T25
+
+T25 ist in K3AG1 verbaut.
+```{r}
+T_25 <- T_25 %>%
+            left_join(komponente_k3ag1, by = "Komponente_ID")
+```
+
+Anschließend werden die importierten Komponententabellen wiederum mit der Einzeilteiltabelle verknüpft.
+```{r}
+rm(komponente_k3ag1, komponente_k3sg1)
+```
+
+#### T30
+
+T30 kann sowohl in K4 als auch in K5 verbaut sein. Deshalb werden diese Komponententabellen im ersten Schritt importiert und aufbereitet.
+```{r}
+komponente_k4 <- read_csv2("./Data/Komponente/Komponente_K4.csv") %>%
+                                        tidy_double_columns() %>%
+                                        unite("Komponente_ID",ID_Karosserie.x | ID_Karosserie.y, na.rm = TRUE, remove = TRUE) %>%
+                                        mutate("Komponente_Herstellernummer" = Herstellernummer) %>%
+                                        mutate("Komponente_Werksnummer" = Werksnummer) %>%
+                                        select(c(-Herstellernummer, -Werksnummer, -Produktionsdatum))
+
+komponente_k5 <- read_csv("./Data/Komponente/Komponente_K5.csv")%>% 
+                                        tidy_double_columns() %>%
+                                        unite("Komponente_ID",ID_Karosserie.x | ID_Karosserie.y, na.rm = TRUE, remove = TRUE) %>%
+                                        mutate("Komponente_Herstellernummer" = Herstellernummer) %>%
+                                        mutate("Komponente_Werksnummer" = Werksnummer) %>%
+                                        select(c(-Herstellernummer, -Werksnummer, -Produktionsdatum))
+```
+
+Anschließend werden die importierten Tabellen mit der Einzeilteiltabelle verknüpft
+```{r}
+T_30 <- T_30 %>% 
+                          left_join(komponente_k4, by = "Komponente_ID") %>%
+                          left_join(komponente_k5, by = "Komponente_ID") %>%
+                          
+                          unite("Komponente_Herstellernummer", Komponente_Herstellernummer.x | Komponente_Herstellernummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          unite("Komponente_Werksnummer", Komponente_Werksnummer.x | Komponente_Werksnummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          mutate("Komponente_Herstellernummer" = as.numeric(Komponente_Herstellernummer)) %>%
+                          mutate("Komponente_Werksnummer" = as.numeric(Komponente_Werksnummer) )
+```
+
+#### T31
+
+T31 ist in K4 und K5 verbaut.
+```{r}
+T_31 <- T_31 %>% 
+                          left_join(komponente_k4, by = "Komponente_ID") %>%
+                          left_join(komponente_k5, by = "Komponente_ID") %>%
+                          
+                          unite("Komponente_Herstellernummer", Komponente_Herstellernummer.x | Komponente_Herstellernummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          unite("Komponente_Werksnummer", Komponente_Werksnummer.x | Komponente_Werksnummer.y, sep = "", na.rm = TRUE, remove = TRUE) %>%
+                          mutate("Komponente_Herstellernummer" = as.numeric(Komponente_Herstellernummer)) %>%
+                          mutate("Komponente_Werksnummer" = as.numeric(Komponente_Werksnummer) )
+```
+
+#### T32
+
+T32 ist in K4 verbaut.
+```{r}
+T_32 <- T_32 %>%
+            left_join(komponente_k4, by = "Komponente_ID")
+```
+
+#### T33
+
+T33 ist in K5 verbaut.
+```{r}
+T_33 <- T_33 %>%
+            left_join(komponente_k5, by = "Komponente_ID")
+```
+
+Anschließend werden die importierten Komponententabellen wiederum mit der Einzeilteiltabelle verknüpft.
+```{r}
+rm(komponente_k4, komponente_k5)
+```
+
+### Importieren und Aufbereitung der Geodaten
+
+#### Tier 1 Geodaten
+
+Für die Aufgabenstellung sind lediglich die Spalten Längengrad, Breitengrad und Werknummer von Relevanz. Deshalb werden die Spalten PLZ und Ort mittels der select Funktion entfernt. Außerdem beinhaltet der Datensatz Zeilen, die mit NA gefüllt sind, welche ebenfalls gelöscht werden können (drop_na()). Des Weiteren sind manche Breitengrade bzw. Längengrade zu "kurz", sprich es fehlen schlichtweg 0 hinter den Werten um auf insgesamt 11 Stellen zu kommen. Diese fehlenden Nullen werden durch die replace Funktion ergänzt. Anschließend werden die Breiten und Längengrade durch 1.000.000 geteilt und auf 4 Nachkommastellen gerundet, um das typische Längen bzw. Breitengrad Format zu erhalten.
+```{r}
+tier1_geo <- read_csv2("./Data/Geodaten/Tier1_Werke_2017-07-11_v1.2_TrR.csv") %>%
+        select(c(-PLZ, -ORT)) %>%
+        rename(Laengengrad = 3) %>%
+        drop_na() %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 5068766, 50687660)) %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 5005266, 50052660)) %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 5225431, 52254310)) %>%
+        mutate(Laengengrad = replace(Laengengrad, Laengengrad == 102389, 10238900)) %>%
+        mutate(Laengengrad = replace(Laengengrad, Laengengrad == 1008458, 10084580)) %>%
+        mutate(Laengengrad = replace(Laengengrad, Laengengrad == 1080846, 10808460)) %>%
+        mutate(Breitengrad = round(Breitengrad / 1000000, 4)) %>%
+        mutate(Laengengrad = round(Laengengrad / 1000000, 4))
+```
+
+#### Tier 2 Geodaten
+
+Dieser Datensatz wird analog zum Tier 1 Geodatensatz importiert bzw. aufbereitet
+```{r}
+tier2_geo <- read_csv2("./Data/Geodaten/Tier2_Werke_2017-07-11_v1.2_TrR.csv") %>%
+        rename(Laengengrad = 5) %>%
+        select(c(Werk, Breitengrad, Laengengrad)) %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 503485, 50348500)) %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 503485, 50348500)) %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 4940027, 49400270)) %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 4986667, 49866670)) %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 5127126, 51271260)) %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 1086667, 10866670)) %>%
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 5216291, 52162910)) %>% 
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 4768308, 47683080)) %>% 
+        mutate(Breitengrad = replace(Breitengrad, Breitengrad == 5118429, 51184290)) %>%
+        mutate(Laengengrad = replace(Laengengrad, Laengengrad == 1032755, 10327550)) %>%
+        mutate(Laengengrad = replace(Laengengrad, Laengengrad == 1032755, 10327550)) %>%
+        mutate(Laengengrad = replace(Laengengrad, Laengengrad == 1086667, 10866670)) %>% 
+        mutate(Breitengrad = round(Breitengrad / 1000000, 4)) %>%
+        mutate(Laengengrad = round(Laengengrad / 1000000, 4))
+```
+
+Die beiden Geodatensätze weisen nach der Aufbereitung folgende Form auf:
+```{r}
+tier1_geo
+```
+
+### Erstellung des finalen Datensatzes
+
+Nun wird der finale Datensatz erstellt und anschließend mit den Geodatensätzen verknüpft. Dies geschieht mithilfe der bind_rows() Funktion, mit der alle zuvor erstellten Einzelteiltabellen "untereinander" gehängt werden und anschließend mit zwei left_joins mit den Geodaten verknüpft werden.
+```{r}
+Einzelteile_gesamt = bind_rows(T_01, T_02, T_03, T_04, T_05, T_06, T_11, T_12, T_13, T_14, T_15, T_21, T_22, T_23, T_24, T_25, T_30, T_31, T_32, T_33) %>%
+                                left_join(tier2_geo, by = c("Werksnummer" = "Werk")) %>%
+                                left_join(tier1_geo, by = c("Komponente_Werksnummer" = "Werk")) %>%
+                                rename(Breitengrad = Breitengrad.x) %>%
+                                rename(Laengengrad= Laengengrad.x) %>%
+                                rename(Komponente_Breitengrad = Breitengrad.y) %>%
+                                rename(Komponente_Laengengrad= Laengengrad.y)
+```
+
+Der finale Datensatz hat nun folgende Form:
+```{r}
+Einzelteile_gesamt
+```
+
+Der letzte Schritt des Imports bzw. der Datenaufbereitung ist, den erstellten Datensatz im Format zu exportieren und lokal abzuspeichern.
+```{r}
+save(Einzelteile_gesamt, file = "Finaler_Datensatz_45.RData")
+```
+
+
+# Visualisierung mittels Shiny-App
+
+## Datenimport
+
+An dieser Stelle wird der bereinigte Datensatz mit den für die App relevanten Spalten importiert. Dieser wird in der Variablen "shiny_data" gespeichert. Für den Import wurde das Paket "miceadds" verwendet.
+```{r eval=FALSE}
+shiny_data <- load.Rdata2("Datensatz.RData")
+```
+In der Variablen "DEU" wird ein Datensatz mit der Form Deutschlands gespeichert. Dies wird genutzt, um die Grenze Deutschlands in der Karte sichtbar zu machen.
+## Allgemein
+```{r eval=FALSE}
+DEU <- getData("GADM", country = "DEU", level = 0)
+```
+Hier wird eine Funktion geschrieben, die abhängig von der Höhe der Variablen x eine andere Farbe zurückgibt.
+```{r eval=FALSE}
+getColor <- function(x){
+  if (x >= 0 && x < 10000){
+    return("#ff603b")
+  }
+  else if(x >= 10000 && x < 20000){
+    return("#ff0000")
+  }
+  else if(x >= 20000 && x < 30000){
+    return("#bb0000")
+  }
+  else if(x >= 30000 && x < 40000){
+    return("#9a0000")
+  }
+  else if(x >= 40000 && x < 50000){
+    return("#790001")
+  }
+  else if(x >= 50000 && x < 75000){
+    return("#5a0004")
+  }
+  else if(x >= 75000 && x < 100000){
+    return("#3a0002")
+  }
+  else if(x >= 100000){
+    return("black")
+  }
+}
+```
+## Frontend: User Interface
+Hier wird die Gestaltung der Benutzeroberfläche festgelegt. Als Theme wird bs_theme verwendet, da hier leicht das Design entsprechend der Vorgaben eingetsellt werden kann.
+Die Hintergrundfarbe (bg) ist "lightsteelblue", Schriftfarben (fg) und Akzentfarben (primary) wurden passend ausgewählt. Als Schriftart wurde "Calibri" ausgewählt.
+```{r eval=FALSE}
+ui <- fluidPage(
+  # Erstellung des Bootstrap themes
+  # Ein Design Package 
+  theme =  bs_theme(
+    bg = "lightsteelblue", 
+    fg = "#305679",
+    primary  = "#305679",
+    base_font = "Calibri", code_font = "Calibri", heading_font = "Calibri"),
+```
+Das gesamte Panel wird aufgeteilt in ein sidebarPanel und ein mainPanel. 
+Im sidebarPanel wird ein Logo eingefügt. Außerdem wird hier ein Input hinzugefügt, in dem der Benutzer interaktiv einen Komponentehersteller auswählen kann.
+```{r eval=FALSE}
+sidebarLayout(
+    # Aufteilung der App in sidabarPanel() und mainPanel()
+    
+    sidebarPanel(htmltools::img(src = knitr::image_uri("./Zusaetzliche_Dateien/LOGO.png"), 
+                                alt = "logo", style = "height: 250px; width: 250px"),
+      selectInput(
+        "Komponente_Herstellernummer", 
+        "Komponenten-Hersteller:", 
+        choices = unique(shiny_data$Komponente_Herstellernummer))),
+```
+![Dropdown Menü](./Zusaetzliche_Dateien/Dropdown Menü.jpg)
+Das mainPanel gliedert sich in zwei Tabs. Im ersten Tab findet sich eine Deutschlandkarte sowie ein Balkendiagramm. Im zweiten Tab befinder sich eine "Beweistabelle".
+```{r eval=FALSE}
+mainPanel(h1("Lieferbeziehungen"),
+  # Erstellung von  2 Tabs mit Titel: Plot, Table
+  # Aufsplitten des Tabs graphische Darstellung
+  tabsetPanel(type = "tabs",
+              tabPanel("Graphische Darstellung", splitLayout(
+                cellWidths = c("60%", "40%"),
+                leafletOutput("mymap"),
+                plotOutput("barchart"))),
+              
+              tabPanel("Tabelle", DTOutput("Beweistabelle"))
+            ))))
+```
+![Layout App](./Zusaetzliche_Dateien/Ganze App.jpg)
+
+## Backend: Server
+Im Server wird festgelegt, was "hinter den Kulissen" passiert. Für die Interaktivität der Shiny App werden hier sogenannte "reactives" benutzt. 
+Das sind Funktionen, bei denen sich Variablen je nach Input ändern / anpassen können.
+```{r eval=FALSE}
+server <- function(input, output, session) {
+```
+### Anzahl der Komponenten
+Im folgenden reactive werden die pro Einzelteilhersteller gelieferten Mengen an Einzelteilen ermittelt. 
+Zunächst wird dafür der "shiny_data"-Datensatz nach dem im Input festgelegten Hersteller gefiltert. 
+Danach wird nach den Werksnummern (Einzelteilhersteller) gruppiert. 
+N() ermittelt die Anzahl an Zeilen pro Werksnummer, und somit die  Anzahl gelieferter Teile. 
+Diese Anzahl wird jeweils in der mit "mutate" erstellten Spalte "Anzahl" hinzugefügt.
+```{r eval=FALSE}
+Anzahl_der_Komponenten <- reactive({shiny_data %>%
+      filter(Komponente_Herstellernummer == input$Komponente_Herstellernummer) %>%
+      group_by(Werksnummer) %>%
+      mutate(Anzahl = n())
+    
+  })
+```
+### Geodaten und Farbzuordnung
+Hier wird ein reactive erstellt in dem für den ausgewählten Komponentenhersteller die Längen- und Breitengrade der Einzelteilhersteller zurückgegeben werden. 
+Ausgangspunkt  ist der shiny_data Datensatz. Dieser  wird über eine Pipe zuerst gefiltert, sodass nur jene Daten ausgewählt werden, die zum ausgewählten Komponentenhersteller gehören.
+Durch mutate()  wird eine Spalte mit der Anzahl der gelieferten Einzelteile hinzugefügt.
+Im nächsten Schritt werden die beiden nicht benötigten Spalten "Komponente_ID" und "ID" entfernt, sodass nur noch die benötigten Geodaten erhalten bleiben. 
+Durch die distinct() Funktion wird sichergestellt, dass jede Zeile nur einmal vorkommt.
+Im  letzten Schritt wird die unter "Allgemein" definierte Funktion "getColor" aufgerufen, und mit mutate() eine neue Zeile mit den zugehörigen Farben erstellt.
+```{r eval=FALSE}
+filtered_location <- reactive({
+    shiny_data %>%
+      filter(Komponente_Herstellernummer == input$Komponente_Herstellernummer) %>%
+      group_by(Werksnummer) %>%
+      mutate(Anzahl = n()) %>%
+      select(c(-Komponente_ID, -ID)) %>%
+      distinct() %>%
+      mutate(color = getColor(Anzahl))
+  })
+```
+### Ermittlung der Entfernung
+Das folgende reactive fügt dem Datensatz "filtered_location" eine Spalte hinzu, in der die Distanz zwischen Einzeteilhersteller und Komponentenhersteller gespeichert wird.
+Die  Funktion rowwise() stellt sicher, dass die Entfernungsermittlung Zeilenweise erfolt. 
+Die Distanz selbst wird mit Hilfe der "distHaversine" Funktion ermittelt. Der damit ermittelte und gerundete Wert wird über die "mutate" Funktion in einer neu hinzugefügten Spalte "Distanz" gespeichert.
+```{r eval=FALSE}
+distance_ETH_KH <- reactive({
+    filtered_location() %>% 
+      rowwise() %>%
+      mutate(Distanz = round(distHaversine(c(Laengengrad, Breitengrad), 
+            c(Komponente_Laengengrad, Komponente_Breitengrad))/1000, digits = 0))
+  })
+```
+### Unique
+Dieses reactive erstellt einen Dataframe, in dem nur die Zeilen behalten werden, bei denen die Kombination aus "Werksnummer" und "Anzahl" einzigartig ist. 
+Dies wird mit Hilfe der "unique"-Funktion umgesetzt.
+```{r eval=FALSE}
+Unique_Anzahl <- reactive({
+    unique(Anzahl_der_Komponenten()[, c("Werksnummer", "Anzahl")])
+  })
+```
+### Karte generieren
+In diesem Abschnitt wird mit dem Package "leaflet" eine Karte generiert. 
+Ausgangspunkt für die Darstellung der Werke auf der Karte bildet der oben beschriebene Datensatz "filtered_location()". 
+AddTiles sorgt dafür dass der  Ausschnitt mit den entsprechenden Daten auf der Karte ausgewählt wird.
+```{r eval=FALSE}
+ output$mymap <- renderLeaflet({
+    leaflet(data = filtered_location()) %>%
+      addTiles() %>%
+```
+### Umrandung Grenze Deutschlands
+Mit dem unter "Allgemein" importierten Datensatz "DEU" wird mit der Funktion addPolylines() eine schwarze Linie in der Form Deutschlands erzeugt. Ziel ist es, Deutschland auf der Karte besser erkennen zu können. 
+```{r eval=FALSE}
+addPolylines(
+        data = DEU,
+        stroke = TRUE,
+        color = "black", opacity = 1, weight = 2) %>%
+```
+### Füllung Deutschlands
+Mit dem selben Datensatz wie im vorherigen Abschnitt wurde mit der Funktion addPolygons() eine hellgelbe Farbe über das Gebiet Deutschlands gelegt. 
+```{r eval=FALSE}
+addPolygons(
+        data = DEU, 
+        stroke = TRUE, smoothFactor = 0.5, fillOpacity = 0.2,
+        color = "#FFFFE0") %>%
+```
+### Ortsmarkierungen
+In diesem Abschnitt werden Markierungen auf der Karte gesetzt, die den Standorten der Einzelteilersteller, sowie dem Komponentenhersteller entsprechen. 
+Die Funktion "addCircleMarkers()" setzt die Markierungen gemäß den ihr übergebenen Koordinaten; in den Argumenten wird außerdem die Größe und der Füllgrad der Marker festgelegt.
+Das Argument "popop" sorgt außerdem dafür, dass durch anklicken der Werke (Komponentenhersteller) jeweils ein Popup erscheint, auf dem weitere Informationen angezeigt werden (u.A. Entfernung des Werkes zum Komponentenhersteller).
+```{r eval=FALSE}
+addCircleMarkers(~Laengengrad, ~Breitengrad, radius = 6, fillOpacity = 0.8, 
+                       popup = paste("<div>",
+                                     "<h5>","Einzelteilhersteller","</h5>",
+                                     "<h6>","Werksname:",filtered_location()$Werksnummer,"</h6>",
+                                     "<h6>","Komponentenhersteller:",input$Komponente_Herstellernummer,"</h6>",
+                                     "<h6>", "Menge:",Unique_Anzahl()$Anzahl,"</h6>",
+                                     "<h6>", "Entfernung:",distance_ETH_KH()$Distanz, "km","</h6>",
+                                     "</div>")) %>%
+      addCircleMarkers(~Komponente_Laengengrad, ~Komponente_Breitengrad, radius =  10, color = "orange",
+                       popup = paste("<div>","<h5>","Komponentenhersteller","</h5>",
+                                      "<h6>","Name:",input$Komponente_Herstellernummer,"</h6>",
+                                      "</div>")) %>%
+```
+![PopUp Einzelteilhersteller](./Zusaetzliche_Dateien/Popup.jpg)
+
+![PopUp Komponentenhersteller](./Zusaetzliche_Dateien/PopUp KH.jpg)
+
+### Pfeile
+An dieser Stelle werden Pfeile hinzugefügt, welche den Volumenstrom an Einzelteilen vom Einzelteilhersteller zum Komponentenhersteller darstellen. 
+Dies geschieht mit der "addFlows"-Funktion aus dem leaflet.minicharts Package. 
+Der Funktion werden zunächst die entsprechenden Koordinaten übergeben, in weiteren Argumenten werden die Pfeile (Flows) noch optisch angepasst. 
+Die Argumente "flow" und "color" sorgen außerdem dafür, dass die dicke und Farbe der Pfeile abhängig von der größe des Volumenstroms ist. 
+Durch das Argument "popup" wird außerdem durch Anklicken des Pfeils die Größe des Volumenstroms angezeigt.
+```{r eval=FALSE}
+addFlows(lng0 = filtered_location()$Laengengrad, lat0 = filtered_location()$Breitengrad,
+               lng1 = filtered_location()$Komponente_Laengengrad, 
+               lat1 =  filtered_location()$Komponente_Breitengrad, 
+               color = filtered_location()$color, opacity = 0.9, maxThickness = 6, 
+               minThickness = 2, flow = Unique_Anzahl()$Anzahl,
+               popup = popupArgs(labels  = paste("Anzahl gelieferter Komponenten"))) %>%
+```
+![PopUp FLow](./Zusaetzliche_Dateien/PopUp Flow.jpg)
+
+### Legende Ortsmarkierungen
+Hier wird eine Legende erstellt um Komponentenhersteller und Einzelteilhersteller unterscheiden zu können. Dafür wird die oben erklärte Farbzuordnung im Argument "pal" verwendet.
+```{r eval=FALSE}
+addLegend(position = "bottomright",title = "Hersteller",
+              pal = colorFactor(palette = c("orange","blue"),
+              domain = c("Komponentenhersteller","Einzelteilhersteller"), 
+              ordered = T), 
+              values = c("Komponentenhersteller","Einzelteilhersteller"),  
+              opacity = 1) %>%
+```
+### Legende farbige Pfeile
+Legende, um die Farben der Pfeile den entsprechenden Volumenströmen zuordnen zu können.
+```{r eval=FALSE}
+addLegend(position = "topright",title = "Volumenstrom",
+              pal = colorFactor(palette = c("#ff603b", "#ff0000", "#bb0000", "#9a0000", 
+                                            "#790001", "#5a0004", "#3a0002", "black"),
+              levels = c("0 - 10.000", "10.000 - 20.000", "20.000 - 30.000", "30.000 - 40.000", 
+                         "40.000 - 50.000", "50.000 - 75.000", "75.000 - 100.000", "> 100.000")), 
+              values = c("0 - 10.000", "10.000 - 20.000", "20.000 - 30.000", 
+                          "30.000 - 40.000", "40.000 - 50.000", "50.000 - 75.000", "75.000 - 100.000", 
+                          "> 100.000"),  
+              opacity = 1)
+  })
+```
+### Balkendiagramm
+Im folgenden Codeabschnitt wird ein Balkendiagramm erstellt, welches die je Einzelteilhersteller gelieferte Menge an Einzelteilen darstellt.
+Das Balkendiagramm wird mit "ggplot" in Verbindung mit "geom_bar" erstellt. Als Datensatz dient der oben beschriebene Dataframe "Unique_Anzahl". 
+In der "theme"-Funktion werden weitere Designelemente des Plots angepasst. Insbesondere wird der PLot so angepasst, dass die Randfarbe und Hintergrundfarbe zu "lightsteelblue" geändert, damit der PLot sich schön in die App einfügt.
+```{r eval=FALSE}
+output$barchart <- renderPlot({
+    
+    ggplot(Unique_Anzahl(), aes(x= factor(Werksnummer), y = Anzahl)) +
+      geom_bar(stat =  "identity", fill = "#09143C", alpha = 0.8) + 
+      labs(x = "Einzelteilhersteller", y = "Anzahl der gelieferten Einzelteile") + 
+    
+      theme(axis.line=element_blank(),
+            panel.background=element_rect(fill  = "lightsteelblue", color = "lightsteelblue"),
+            plot.background = element_rect(fill = "lightsteelblue", color = "lightsteelblue"),
+            panel.border=element_blank(),
+            panel.grid.minor=element_blank(),
+            panel.grid.major=element_blank())
+  })
+```
+![Balkendiagramm](./Zusaetzliche_Dateien/Balkendiagramm.jpg)
+
+### Beweistabelle
+Hier wird eine Tabelle erstellt, in der die im Balkendiagramm verwendeten Daten mit Hilfe des Pakets "DT" präsentiert werden. 
+```{r eval=FALSE}
+output$Beweistabelle <- renderDT({
+    Unique_Anzahl()
+  })
+}
+```
+![Beweistabelle](./Zusaetzliche_Dateien/Tabelle.jpg)
+
+### Ausführen der App
+Im letzten Abschnitt wird die App ausgeführt.
+```{r eval = FALSE}
+shinyApp(ui = ui, server = server)
+```

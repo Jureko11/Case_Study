@@ -1,0 +1,228 @@
+---
+title: "Allgemeine Aufgaben"
+author: "Gruppe 45"
+output: 
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+    toc: TRUE
+    toc_depth: 2
+toc-title: "Inhaltsverzeichnis"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+# Aufgabe 1
+
+### a)
+
+Da die Normalverteilung am häufigsten auftritt, wird zu erst eine Prüfung auf Normalverteilung vorgenommen:
+  Um auf Normalverteilung zu prüfen, wird ein QQ-Diagramm und ein Histogramm erstellt, anhand dieser Abbildungen wird anschließend die Prüfung auf Normalverteilung graphisch erfolgen:
+  Zu Beginn werden die benötigten Pakete mittels einer Installationsroutine (analog zur Case Study) installiert und importiert.
+```{r}
+list_of_req_packages <- c("tidyverse","stringr", "bizdays")
+needed_packages <- list_of_req_packages[!(list_of_req_packages %in% installed.packages()[,"Package"])]
+if(length(needed_packages) > 0) install.packages(needed_packages, repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(bizdays)
+library(stringr)
+```
+  
+  Anschließend werden die notwendigen Daten geladen und in der Datentabelle time_delay zusammengefügt  In der hinzugefügten Spalte "geplanter Versand" wird auf das Produktionsdatum zwei Tage hinzuaddiert um die interne Logistik zu berücksichtigen. Die zweite hinzugefügte Spalte gibt dann die Versanddauer bzw. die Differenz zwischen geplanten Versandsdatum und Wareneingang bzw. den Logistikverzug an. Um nur Werktage zu berücksichtigen wird der Kalender "Werktage" erstellt und mit der offset funktion verwendet. 
+  
+  
+```{r}
+komponente_k7 <- read_csv2("./Data/Logistikverzug/Komponente_K7.csv")
+delay_k7 <- read_csv("./Data/Logistikverzug/Logistics_delay_K7.csv")
+Werktage <- create.calendar('my_calendar', weekdays = c('saturday', 'sunday'))
+
+#Zusammenfügen der Daten + Berechnung der Versanddauer (interne Logistik abgezogen)
+
+time_delay <- inner_join(x = komponente_k7, y = delay_k7, by = "IDNummer") %>%
+  select("IDNummer", "Produktionsdatum", "Wareneingang") %>%
+  mutate('geplanter_Versand' = offset(Produktionsdatum, n=2, cal = Werktage))%>%
+  mutate(Versanddauer = difftime(Wareneingang, geplanter_Versand))
+```  
+
+
+Zuerst wir das QQ Diagramm erstellt:
+```{r}
+time_delay <-time_delay %>%
+  mutate(Versanddauer2=scale(time_delay$Versanddauer))
+qqnorm(time_delay$Versanddauer2)
+qqline(time_delay$Versanddauer2)
+```
+
+Da es sehr viele Einzeldaten mit der gleichen Versandsdauer gibt, ist die Darstellung des QQ-Diagramm nicht sehr eindeutig. Dennoch lässt sich festellen, das in etwa Normalverteilung vorliegt, da die Punkte vor allem im wichtigen Bereich in der Mitte auf der Linie liegen. Es wird dies nochmal mithilfe eines Histogramms überprüft:
+
+Das Histogramm wird mit Hilfe von ggplot erstellt:
+ 
+```{r}
+ggplot(time_delay, aes(x = as.factor(Versanddauer),defaulting="continous")) + 
+  geom_bar(width=0.5, fill="cadetblue2") + 
+  labs(x="Logistikverzug[Tage]", y="Anzahl", title="Histogramm Logistikverzug Komponente K7") + 
+  theme_classic()
+
+```
+
+Das Histogramm ist eindeutiger. Es zeigt eine starke Orientierung in der Mitte und fällt nach links und recht etwa gleichmäßig ab. Es liegt in etwa Normalverteilung vor.
+
+
+
+### b)
+
+Mit der min und max function lässt sich die mindeste und höchste vergangene Zeit zwischen Warenausgang und Wareneingang leicht bestimmen:
+
+```{r}
+min(time_delay$Versanddauer)
+max(time_delay$Versanddauer)
+```
+Es vergehen **mindestens 3** Tage und **maximal 16** Tage zwischen Warenausgang und Wareneingang. 
+
+### c)
+
+Der Mittelwert lässt sich einfach mit der mean-function berechnen:
+
+```{r}
+mean(time_delay$Versanddauer)
+```
+ 
+Der Mittelwert des Logistikverzugs lautet **7.367506 Tage**.
+
+
+### d)
+
+Das Histogramm wurde bereits in Aufgabe 1a) dargestellt. 
+
+
+# Aufgabe 2 
+
+Gründe für Daten in separaten Dateien anstatt einer riesigen Tabelle abzuspeichern:
+
+1. Falls nicht alle Informationen relevant sind für den Anwendungsfall, müssen nicht alle Daten geladen werden. Daher wird weniger Speicherplatz benötigt und die Daten können schneller abgerufen werden. (Atomare Ansicht)
+
+2. Das wiederholte Abspeichern der gleichen Daten (Redundanzen) wird dadurch vermieden.
+
+3. Aktualisierung der Datenbank wird durch Relationen zwischen einzelnen Tabellen erleichtert. Inkonsistenzen werden vermieden.
+
+4. Einfachere Abbildung der Zusammenhänge zwischen den Datensätzen und bessere Übersichtlichkeit einzelner Datensätze. Beispielsweise besteht ein Auto aus Komponenten, welche dann aus unterschiedlichen Einzelteilen besteht.
+
+Bei dem zugrunde liegenden Datenkonzept handelt es sich um eine relationale Datenbank. Dabei werden die Spalten als Attribute und die Zeilen als Datensätze bezeichnet. Jede Zeile bildet einen Datensatz mit einer eindeutigen Schlüssel ID in der Tabelle ab. 
+
+# Aufgabe 3
+
+Zuerst wird geprüft in welchen Datenbanken die Komponente 7 enthalten ist und wenn sie enthalten ist, ob sie ausschließlich enthalten ist.
+
+
+```{r}
+
+#Import der Zulassungensdaten und Bestandteile
+
+zulassung <- read_csv2("./Data/Zulassungen/Zulassungen_alle_Fahrzeuge.csv")
+
+bestandteile_typ11 <- read_csv2("./Data/Fahrzeug/Bestandteile_Fahrzeuge_OEM1_Typ11.csv")
+
+bestandteile_typ12 <- read_csv2("./Data/Fahrzeug/Bestandteile_Fahrzeuge_OEM1_Typ12.csv")
+
+bestandteile_typ21 <- read_csv2("./Data/Fahrzeug/Bestandteile_Fahrzeuge_OEM2_Typ21.csv")
+
+bestandteile_typ22 <- read_csv2("./Data/Fahrzeug/Bestandteile_Fahrzeuge_OEM2_Typ22.csv")
+
+#Überprüfung der Bestandteile auf K7
+
+K7_Typ11 <- bestandteile_typ11 %>% 
+  filter(str_detect(ID_Karosserie,"^K7")) 
+  
+K7_Typ12 <- bestandteile_typ12 %>% 
+  filter(str_detect(ID_Karosserie,"^K7")) 
+  
+K7_Typ21 <- bestandteile_typ21 %>% 
+  filter(str_detect(ID_Karosserie,"^K7"))
+  
+K7_Typ22 <- bestandteile_typ22 %>% 
+  filter(str_detect(ID_Karosserie,"^K7"))
+
+count(K7_Typ22)
+
+count(bestandteile_typ22)
+``` 
+
+Die Bestandteile Typ11,Typ12 und Typ21 werden nicht für die Komponente K7 genutzt.K7 kommt nur in der Datenbank von Typ22 vor und alle im Typ22 enthaltenen Daten enthalten die Komponente K7.
+  
+```{r}
+Geodaten_Wehr<-read_csv2("./Data/Geodaten/Geodaten_Gemeinden_v1.2_2017-08-22_TrR.csv") %>%
+  filter(str_detect(Gemeinde, "^WEHR"))
+
+Geodaten_Wehr
+```
+
+Es wird nach dem Wehr im Landkreis Waldshut mit der PLZ 79664 gesucht. In der Datenbank Geodaten_Wehr ist zu erkennen, dass das "Wehr1" die gesuchte Gemeinde ist. Deswegen wird in einem ersten Schritt die Datenbank "zulassung" nach "Wehr1" gefiltert. Wenn man nun die Datenbanken "zulassung_wehr" und "bestandteile_typ22" verbindet, erhält man die Zulassungen mit der Komponente K7 in Wehr im Landkreis Waldshut. Diese kann man nun mit der Funktion count() zählen.
+
+```{r}
+#Filtern nach Gemeinden == WEHR1
+
+zulassung_wehr <- zulassung %>%
+  filter(str_detect(Gemeinden, "WEHR1"))
+
+#Bilden der Listen (Auto in Wehr zugelassen & Bestandteile der Autos)
+
+typ22_wehr <- inner_join(zulassung_wehr, bestandteile_typ22, by = c("IDNummer" = "ID_Fahrzeug"))
+
+count(typ22_wehr)
+
+```
+
+Es sind **24** Fahrzeuge mit der Komponente K7 in Wehr, Landkreis Waldshut zugelassen.
+
+
+# Aufgabe 4
+
+
+| Attribut|  Datentyp |
+|---------|-----------|
+|  ...1     | Numeric   |
+| IDNummer  | Character |
+| Gemeinden | Character |
+| Zulassung |   Date    |
+
+
+# Aufgabe 5
+
+Veröffentlichung einer Applikation:
+  
+  Warum Datensätze in der Datenbank eines Servers speichern?
+  
+  - Server sind als Speicherort zuverlässiger als ein einzelner PC.
+  
+  - Die Daten sollten jederzeit zugänglich sein und es sollte Reaktivität gegeben sein.
+
+Warum die Datensätze nicht auf einem Personal Computer speichern?
+
+  - Zugriff auf den persönlichen Computer soll verhindert werden. Es könnte ein Weg sein, um persönliche Daten zu hacken.
+  
+  - Daten sollen jederzeit zugänglich sein, was bei einem PC in der Regel nicht der Fall ist.
+
+Wie macht man die Applikation für die Kundschaft einfach zugänglich?
+
+  - Mit Hilfe von Anwendungen wie shinyapps.io ist die Veröffentlichung als Webseite sehr unkompliziert.
+  
+  - Durch Publizieren der App als Webseite, entfällt die Installation von R für den Nutzer. Zudem ist die Vorbereitung eines Weblinks deutlich einfacher, so dass mehr Nutzer darauf zugreifen können.
+  
+
+# Aufgabe 6
+Wie bereits vorher überprüft kommen Autos mit der Komponente K7 nur in der Datenbank vom typ 22 vor. Daher muss nur in dieser Datenbank gesucht werden:
+
+```{r}
+Typ22 <- inner_join(zulassung, bestandteile_typ22, by = c("IDNummer" = "ID_Fahrzeug"))
+
+zulassungsort <- Typ22 %>%
+  filter(ID_Karosserie == 'K7-114-1142-31') %>%
+  pull(Gemeinden)
+
+zulassungsort
+```
+Das gesuchte Fahrzeug wurde in **Allendorf (EDER)** zugelassen.
